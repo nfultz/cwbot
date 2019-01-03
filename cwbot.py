@@ -16,65 +16,16 @@ starterbot_id = None
 RTM_READ_DELAY = 1 # 1 second delay between reading from RTM
 EXAMPLE_COMMAND = "do"
 MENTION_REGEX = "^<@(|[WU].+?)>(.*)"
+CMD_PREFIX = "bot_"
 
 # data saving support
-SAVE_FILE=os.environ.get('SLACK_SAVE_FILE')
 our_data={}
 
 user_list=None
 
 time_parse = re.compile("([0-9]+):([0-9]+)")
 
-#
-# Functions
-#
-def bot_return_help(channel, user, args, ts):
-    help = "```CWBot: track times for games played at https://www.nytimes.com/crosswords/game/mini\n\n"
-    help += "- Record your daily time by saying '@cwbot time HH:MM'\n"
-    help += "\n"
-    help += "Other commands: \n"
-    for command in bot_commands:
-        if 'help' in bot_commands[command]:
-            help += "%-10.10s %s\n" % (command, bot_commands[command]['help'])
-    help += "```"
-
-    response = {
-        "method": "chat.postMessage",
-        "channel": channel,
-        "text": help
-    }
-
-    return response
-
-def bot_echo_test(channel, user, args, ts):
-    response = {
-        "method": "chat.postMessage",
-        "channel": channel,
-        "text": " ".join(args)
-    }
-
-    return response
-
-def bot_whoami(channel, user, args, ts):
-    user_info = find_user(user)
-    # for info in user_info:
-    #     print("%-20s: %s" % (info, user_info[info]))
-
-    return_string = "```"
-    return_string += "userid:    " + user + "\n"
-    return_string += "full name: " + user_info['real_name'] + "\n"
-    return_string += "name:      " + user_info['name'] + "\n"
-    return_string += "```"
-
-    response = {
-        "method": "chat.postMessage",
-        "channel": channel,
-        "text": return_string
-    }
-
-    return response
-
-def bot_parse_hour_minute(mmss):
+def parse_hour_minute(mmss):
     result = time_parse.match(mmss)
     if result:
         return int(result.group(1)) * 60 + int(result.group(2))
@@ -85,41 +36,6 @@ def make_datestr():
     now = time.localtime()
     date = "%04s/%02s/%02s" % (now.tm_year, now.tm_mon, now.tm_mday)
     return date
-
-def bot_add_time(channel, user, args, ts):
-    user_info = find_user(user)
-    if not user_info:
-        return "Unable to find your user information"
-
-    global our_data
-
-    if 'cwtimes' not in our_data:
-        our_data['cwtimes'] = {}
-
-    if user not in our_data['cwtimes']:
-        our_data['cwtimes'][user] = {
-            'times': []
-        }
-
-    date = make_datestr()
-
-    time = bot_parse_hour_minute(args[0])
-    if not time:
-        return "invalid time; must be MM:SS formatted."
-    
-    our_data['cwtimes'][user]['times'].append({'date': date, 'time': time})
-
-    save_data()
-
-
-    response = {
-        "method": "reactions.add",
-        "channel": channel,
-        "timestamp": ts,
-        "name": "white_check_mark"
-    }
-
-    return response
 
 def average_score(entries):
     total = 0
@@ -132,62 +48,6 @@ def average_score(entries):
 def sec_to_hhmm(secs):
     return "%02d:%02d" % (secs/60, secs % 60)
 
-def bot_score(channel, user, args, ts):
-    if 'cwtimes' not in our_data:
-        return "No scores recorded so far"
-
-    # create a header
-    result_msg = "```"
-    result_msg += "%-30.30s %3s    %s\n" % ("Name", "Cnt", "Average")
-
-    # add each user scores summary
-    for user in our_data['cwtimes']:
-        user_info = find_user(user)
-        ave_score = sec_to_hhmm(average_score(our_data['cwtimes'][user]['times']))
-        result_msg += "%-30.30s %3d    %s\n" % (user_info['real_name'], len(our_data['cwtimes'][user]['times']),
-                                              sec_to_hhmm(average_score(our_data['cwtimes'][user]['times'])))
-    result_msg += "```"
-
-    response = {
-        "method": "chat.postMessage",
-        "channel": channel,
-        "text": result_msg
-    }
-
-    return response
-
-def bot_entries(channel, user, args, ts):
-    result_str = "```"
-    for entry in our_data['cwtimes'][user]['times']:
-        result_str += "%-15.15s %s\n" % (entry['date'], sec_to_hhmm(entry['time']))
-    result_str += "```"
-
-    # Finds and executes the given command, filling in response
-    response = {
-        "method": "chat.postMessage",
-        "channel": channel,
-        "text": result_str
-    }
-
-    return response
-
-bot_commands = {
-    'help':   {'fn': bot_return_help,
-               'help': "Get help (this message)"},
-    'echo':   {'fn': bot_echo_test,
-               'help': "Repeat back whatever I say"},
-    'whoami': {'fn': bot_whoami,
-               'help': "print out information about me"},
-    'time':   {'fn': bot_add_time,
-               'help': "Add todays' time to your running score"},
-    'scores': {'fn': bot_score,
-               'help': "Display the scores to date"},
-    'score':   {'fn': bot_score},
-    'entries': {'fn': bot_entries,
-                'help': "List each recorded entry (for you)"}
-}
-
-
 #
 # Support
 #
@@ -197,20 +57,170 @@ def find_user(id):
             return user
     return None
 
-#
-# Load and Save Data
-#
-def save_data():
-    with open(SAVE_FILE, "w") as outf:
-        json.dump(our_data, outf, sort_keys=True, indent=4)
-        print("saved data")
+class CrosswordBot:
 
-def load_data():
-    if os.path.exists(SAVE_FILE):
-        global our_data
-        with open(SAVE_FILE, "r") as inf:
-            our_data = json.load(inf)
-        print("loaded data...")
+    def __init__(self, filename=None):
+        self.data = {"cwtimes": {}}
+        self.filename = filename
+        # LOAD DATA
+        if os.path.exists(filename):
+            with open(filename, "r") as inf:
+                self.data = json.load(inf)
+            print("loaded data...")
+
+    def bot_help(self, channel, user, args, ts):
+        '''
+        Get help (this message)
+        '''
+
+        help = "```CWBot: track times for games played at https://www.nytimes.com/crosswords/game/mini\n\n"
+        help += "- Record your daily time by saying '@cwbot time HH:MM'\n"
+        help += "\n"
+        help += "Other commands: \n"
+        for command in dir(self):
+            if command.startswith(CMD_PREFIX) : #'help' in bot_commands[command]:
+                help += "%-10.10s %s\n" % (command[4:], getattr(self, command).__doc__.strip())
+        help += "```"
+
+        response = {
+            "method": "chat.postMessage",
+            "channel": channel,
+            "text": help
+        }
+
+        return response
+
+    def bot_echo(self, channel, user, args, ts):
+        '''
+        Repeat back whatever I say
+        '''
+
+        response = {
+            "method": "chat.postMessage",
+            "channel": channel,
+            "text": " ".join(args)
+        }
+
+        return response
+
+    def bot_whoami(self, channel, user, args, ts):
+        '''
+        Print out information about me
+        '''
+
+        user_info = find_user(user)
+        # for info in user_info:
+        #     print("%-20s: %s" % (info, user_info[info]))
+
+        return_string = "```"
+        return_string += "userid:    " + user + "\n"
+        return_string += "full name: " + user_info['real_name'] + "\n"
+        return_string += "name:      " + user_info['name'] + "\n"
+        return_string += "```"
+
+        response = {
+            "method": "chat.postMessage",
+            "channel": channel,
+            "text": return_string
+        }
+
+        return response
+
+
+    def bot_time(self, channel, user, args, ts):
+        '''
+        Add today's time to your running score
+        '''
+
+        user_info = find_user(user)
+        if not user_info:
+            return "Unable to find your user information"
+
+        if 'cwtimes' not in self.data:
+            self.data['cwtimes'] = {}
+
+        if user not in self.data['cwtimes']:
+            self.data['cwtimes'][user] = {
+                'times': []
+            }
+
+        date = make_datestr()
+
+        time = parse_hself.minute(args[0])
+        if not time:
+            return "invalid time; must be MM:SS formatted."
+        
+        self.data['cwtimes'][user]['times'].append({'date': date, 'time': time})
+
+        save_data()
+
+
+        response = {
+            "method": "reactions.add",
+            "channel": channel,
+            "timestamp": ts,
+            "name": "white_check_mark"
+        }
+
+        return response
+
+
+    def bot_score(self, channel, user, args, ts):
+        '''
+        Display the scores to date
+        '''
+
+        if 'cwtimes' not in self.data:
+            return "No scores recorded so far"
+
+        # create a header
+        result_msg = "```"
+        result_msg += "%-30.30s %3s    %s\n" % ("Name", "Cnt", "Average")
+
+        # add each user scores summary
+        for user in self.data['cwtimes']:
+            user_info = find_user(user)
+            ave_score = sec_to_hhmm(average_score(self.data['cwtimes'][user]['times']))
+            result_msg += "%-30.30s %3d    %s\n" % (user_info['real_name'], len(self.data['cwtimes'][user]['times']),
+                                                  sec_to_hhmm(average_score(self.data['cwtimes'][user]['times'])))
+        result_msg += "```"
+
+        response = {
+            "method": "chat.postMessage",
+            "channel": channel,
+            "text": result_msg
+        }
+
+        return response
+
+    def bot_entries(self, channel, user, args, ts):
+        '''
+        List each recorded entry (for you)
+        '''
+
+        result_str = "```"
+        for entry in self.data['cwtimes'][user]['times']:
+            result_str += "%-15.15s %s\n" % (entry['date'], sec_to_hhmm(entry['time']))
+        result_str += "```"
+
+        # Finds and executes the given command, filling in response
+        response = {
+            "method": "chat.postMessage",
+            "channel": channel,
+            "text": result_str
+        }
+
+        return response
+
+
+
+    #
+    # Save Data
+    #
+    def save_data(self):
+        with open(self.filename, "w") as outf:
+            json.dump(self.data, outf, sort_keys=True, indent=4)
+            print("saved data")
 
 #
 # Connection / routing
@@ -237,7 +247,7 @@ def parse_direct_mention(message_text):
     # the first group contains the username, the second group contains the remaining message
     return (matches.group(1), matches.group(2).strip()) if matches else (None, None)
 
-def handle_command(command, channel, user, ts):
+def handle_command(bot, command, channel, user, ts):
     """
         Executes bot command if the command is known
     """
@@ -251,15 +261,19 @@ def handle_command(command, channel, user, ts):
 
     # This is where you start to implement more commands!
     cmd, *args = command.split()
-    if cmd in bot_commands:
-        fn = bot_commands[cmd]['fn']
-        response = fn(channel, user, args, ts) # call it
+    fn = getattr(bot, CMD_PREFIX + cmd, None)
+
+    if not fn:
+        return None
+
+    response = fn(channel, user, args, ts) # call it
 
     # Sends the response back to the channel
     return slack_client.api_call(**response)
 
 if __name__ == "__main__":
-    load_data()
+    SAVE_FILE=os.environ.get('SLACK_SAVE_FILE')
+    bot = CrosswordBot(SAVE_FILE)
     if slack_client.rtm_connect(with_team_state=False):
         print("Starter Bot connected and running!")
         # Read bot's user ID by calling Web API method `auth.test`
@@ -270,7 +284,7 @@ if __name__ == "__main__":
         while True:
             command, channel, user, ts = parse_bot_commands(slack_client.rtm_read())
             if command:
-                handle_command(command, channel, user, ts)
+                handle_command(bot, command, channel, user, ts)
             time.sleep(RTM_READ_DELAY)
     else:
         print("Connection failed. Exception traceback printed above.")
